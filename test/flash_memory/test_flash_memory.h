@@ -8,6 +8,6 @@
 #ifndef __FLASH_TEST_FLASH_H__
 #define __FLASH_TEST_FLASH_H__
 
-void test_veprom(void);
+void test_flash_memory(void);
 
 #endif /* __FLASH_TEST_FLASH_H__ */

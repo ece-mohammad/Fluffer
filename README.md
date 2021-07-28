@@ -1,418 +1,608 @@
 
-# FLuffer
+# Fluffer
 
-FLuffer, or Flash buffer, is a buffer, that it is stored in
-permanent flash storage instead of RAM. 
+Fluffer, is a persistent FIFO buffer (FIFO queue data structure) that it is stored in permanent flash storage instead of RAM. Data stored by Fluffer will stay after reset, and all entries (buffer elements) will occupy the same space in memory.
 
-FLuffer reads and writes data persistently in a FIFO manner.
-Data stored by FLuffer will stay after reset. All entries 
-(buffer elements) will occupy the same space in memory.
+## Table of Contents
+<!-- MarkdownTOC -->
+
+- [Motivation](#motivation)
+- [Challenges](#challenges)
+- [Design](#design)
+    - [Software Requirements](#software-requirements)
+    - [Inspiration](#inspiration)
+    - [Memory Organization](#memory-organization)
+    - [Read](#read)
+    - [Write](#write)
+    - [Clean Up](#clean-up)
+    - [Migration](#migration)
+- [Specs](#specs)
+    - [Configuring Fluffer](#configuring-fluffer)
+    - [Calculating Required Memory](#calculating-required-memory)
+    - [Wear Leveling](#wear-leveling)
+- [Public Types](#public-types)
+    - [Fluffer_Config_t](#fluffer_config_t)
+    - [Fluffer_Context_t](#fluffer_context_t)
+    - [Fluffer_Handle_Error_t](#fluffer_handle_error_t)
+    - [Fluffer_Handles_t](#fluffer_handles_t)
+    - [Fluffer_t](#fluffer_t)
+    - [Fluffer_Reader_t](#fluffer_reader_t)
+    - [Fluffer_Error_t](#fluffer_error_t)
+- [Public APIs](#public-apis)
+    - [Fluffer_enInitialize](#fluffer_eninitialize)
+    - [Fluffer_enInitReader](#fluffer_eninitreader)
+    - [Fluffer_enIsEmpty](#fluffer_enisempty)
+    - [Fluffer_enIsFull](#fluffer_enisfull)
+    - [Fluffer_enReadEntry](#fluffer_enreadentry)
+    - [Fluffer_enMarkEntry](#fluffer_enmarkentry)
+    - [Fluffer_enWriteEntry](#fluffer_enwriteentry)
+- [Usage](#usage)
+    - [Example 1](#example-1)
+    - [Example 2](#example-2)
+    - [Example 3](#example-3)
+- [Notes](#notes)
+
+<!-- /MarkdownTOC -->
 
 
-### Challenges
+<a id="motivation"></a>
+## Motivation
 
-Flash storage is a bit challenging, because it can't be 
-overwritten, it must be erased before writing new data in it. 
+Fluffer was made to solve a problem that faces IoT devices. The problem is, missing telemetry data during connection blackout (internet connection is unavailable for whatever reasons). We needed a way to somehow store the telemetry data during the blackout and resend them when the connection is up again. That was challenging as the devices spent most of their time in low power mode, and the RAM contents were erased each time the device wakes up from low power mode. And we needed to store the last N unsent messages, not just the last single unsent message.
+So, Fluffer was made, a persistent buffer in FLASH memory of the microcontroller. And satisfies the needs and objectives required:
+1. Its persistent (stored in FLASH)
+2. Stores multiple instances of the same object
+
+
+<a id="challenges"></a>
+## Challenges
+
+Flash memory is a bit challenging, because it can't be overwritten and it must be erased before writing new data in it.
 And there are 2 main problems with flash erase:
+ - Flash memory is block erasable, a block can contain multiple pages and each page has multiple bytes.
+ - Flash cells have a limited number of erase cycles, after that, the cells are corrupted and store data. And since the flash is block erasable, that translates to blocks and not individual cells. A block with some corrupted cells in it, is a considered a corrupted block and becomes unusable.
 
- - Flash is block erasable, and each block can hold 
-   multiple entries.
-
- - Flash cells have a limited number of erase cycles, after 
-   that, the cells are corrupted. And since the flash is
-   block erasable, that translates to blocks and not 
-   individual cells.
-
-This gives rise to some challenges:
-
- - Limiting the number of block erase in the flash, is very
-   important:
-   cycle between multiple blocks to write and only erase a
-   block before using it. This will reduce the number of erase
-   for each block down to (1 / N). On the other hand, will
-   use N more blocks.
-
- - Removing an entry from the buffer:
-   Don't remove entries, or to be more clear, don't erase 
-   entries. Instead add a flag to each entry, with an initial 
-   value of `0xFFFF`. When the element to be removed, overwrite
-   the flag with a different value. The entry becomes marked
-   for removal.
- 
- - Adding an entry when the buffer is full:
-   Move unmarked entries to a secondary buffer, then add 
-   the new entry.
+This gave rise to some challenges:
+ - Limiting the number of block erase in the flash, is very important. Solution: cycle between multiple blocks to write and only erase a block before using it. This will reduce the number of erase for each block down to (1 / N). On the other hand, will use N more blocks.
+ - Removing an entry from the buffer. Solution: Do not to remove entries, or to be more clear, don't erase entries. Instead add a flag to each entry, with an initial value of `0xFFFF`. When the element to be removed, overwrite the flag with a constant value. The entry becomes marked for removal.
+ - Adding an entry when the buffer is full. Solution: Move unmarked entries to a secondary buffer, then add the new entry.
 
 
-### Design
+<a id="design"></a>
+## Design
 
-#### Memory Organization 
+<a id="software-requirements"></a>
+### Software Requirements
+1. Clean and crisp API that supports basic FIFO buffer functions (initialize, push, pop, is_empty, is_full)
+2. Support multiple instances to co-exist in the same memory (no overlapping), each instance has its own configurations
+3. Support for on chip FLASH memory and off chip (external) FLASH memory
+3. ANSI C99 compatible
+
+<a id="inspiration"></a>
+### Inspiration
+Fluffer as inspired heavily by ST's application note on EEPROM emulation [^1] in FLASH memory for microcontroller that don't have an internal EEPROM.
+
+<a id="memory-organization"></a>
+### Memory Organization 
 
 ```
-+---------------------------+      +---------------------------+
-| Scnd Buffer |             |      | Main Buffer | Entry Start |  <----- Write
-+-------------+             |      +-------------+-------------+  -----> Read
-|                           |      | Entry Mark  | Entry Data  |
-|                           |      +---------------------------+
-|                           |      |        Entry Data         |
-|                           |      +---------------------------+
-|                           |      | Entry Start | Entry Mark  |
-|                           |      +---------------------------+
-|                           |      |        Entry Data         |
-|                           |      +---------------------------+
-|                           |      | Entry Data  |             |
-|                           |      +-------------+             |
-|                           |      |             .             |
-|                           |      |             .             |
-|                           |      |             .             |
-|                           |      |             .             |
-|                           |      |             .             |
-+---------------------------+      +---------------------------+
+fluffer block:
 
++---------------------------+ 
+|                           |  <--+ 
+|                           |     |
+|                           |     |
+|                           |     |
+|                           |     |
+|                           |     |
+|                           |     |
+|                           |     +--- M memory pages
+|                           |     |
+|                           |     |
+|                           |     |
+|                           |     |
+|                           |     |
+|                           |     |
+|                           |  <--+
++---------------------------+
+
+allocated memory organization:
+
++----------------+----------+        +----------------+----------+        +-------------+-------------+
+| Scnd Buffer #1 |          |        | Scnd Buffer #2 |          |        | Main Buffer | Entry Mark  | --> head (read)
++----------------+          |        +----------------+          |        +-------------+-------------+ 
+|                           |        |                           |        |        Entry Data         |
+|                           |        |                           |        +-------------+-------------+
+|                           |        |                           |        | Entry Mark  | Entry Data  |
+|                           |        |                           |        +-------------+-------------+
+|                           |        |                           |        | Entry Data  |             | <-- tail (write)
+|                           |        |                           |        +-------------+             |
+|                           |        |                           |        |             .             |
+|                           |        |                           |        |             .             |
+|                           |        |                           |        |             .             |
+|                           |        |                           |        |             .             |
+|                           |        |                           |        |             .             |
+|                           |        |                           |        |             .             |
+|                           |        |                           |        |             .             |
++---------------------------+        +---------------------------+        +---------------------------+
 ```
 
-FLuffer will allocate 2 areas. A main buffer, and a secondary 
-buffer. The main buffer is the default read/write target to
-add new entries. The secondary buffer is used as temporary 
-storage during buffer clean up.
+Fluffer will allocate multiple blocks, at least 2 blocks, each block is `M` pages. A main buffer, and *at least* 1 secondary buffer. A Fluffer of 3 blocks ( 1 main buffer and 2 secondary buffers) will be used as an example throughout this document.
+The main buffer is the default read/write target, and the secondary buffer is used as temporary storage during buffer clean up. Each block has a label at its first byte that defines it as a main or secondary buffer. All entries in Fluffer will have the same size.
 
-Each buffer has a label at its first byte that defines 
-it as a main or secondary buffer.
+<a id="read"></a>
+### Read
 
-All entries in FLuffer have the same size in memory.
+Reading entries from the buffer requires a reader instance, that is initialized by fluffer function <a href="">`Fluffer_enInitReader`</a>. The reader instance points to fluffer instance's head. Reading from a reader instance returns the current entry pointed to by the reader's head. The reader is exhausted after all entries in the main buffer are read and the reader's head points to the fluffer instance's tail. This approach allows multiple independent reader for the same fluffer instance.
 
-#### Read
+```text
+before read:
 
-When reading an entry, FLuffer will go to main buffer, and 
-look for first unmarked entry and read it. As subsequent call
-to read will get the next unmarked entry, unless the reader 
-is reset.
+block 0                       head                                      tail          
++-------------+-------------+-------------+-------------+-------------+-------------+
+| main buffer | [M] entry 0 | [U] entry 1 | [U] entry 2 | ........... |             |
++-------------+-------------+-------------+-------------+-------------+-------------+
+                             reader head
 
-#### Write
+after read:
 
-Writing entries, append them to the main buffer. When writing 
-an entry, there are multiple scenarios:
+block 0                       head                                      tail          
++-------------+-------------+-------------+-------------+-------------+-------------+
+| main buffer | [M] entry 0 | [U] entry 1 | [U] entry 2 | ........... |             |
++-------------+-------------+-------------+-------------+-------------+-------------+
+                                           reader head
 
- - main buffer has enough empty space:
-   FLuffer will append the new entry to the main 
-   buffer.
-   
- - main buffer is out of space:
-   FLuffer will start clean up of main buffer,
-   then attempt to append the new entry.
-   There can be 2 scenarios here:
-   
-   a) There is enough space after clean up:
-   The entry is appended to main buffer
-   
-   b) There is no space left:
-   FLuffer will start migrating main buffer into
-   secondary buffer
+[M]         : marked entry
+[U]         : unmarked entry
+........... : repeat last block (entry or empty memory)
+```
 
-#### Clean Up
+<a id="write"></a>
+### Write
 
-Clean up process is the main reason the secondary buffer 
-exists. Also, It's how FLuffer frees space in the main 
-buffer.  Clean up is triggered when no space is left in 
-the main buffer after an entry write.
+Writing entries, append them to the main buffer. When writing an entry, there are multiple scenarios:
+ - main buffer has enough empty space: Fluffer will append the new entry to the main buffer.
+ - main buffer is out of space: Fluffer will start clean up of main buffer, then attempt to append the new entry. There can be 2 scenarios here:
+   a) There is enough space after clean up; the entry is appended to main buffer
+   b) There is no space left; Fluffer will start migrating main buffer into secondary buffer
 
-FLuffer cleans up the main buffer in the following steps:
+```text
+before write:
 
+block 0                       head                       tail          
++-------------+-------------+-------------+-------------+--------------+-------------+
+| main buffer | [M] entry 0 | [U] entry 1 | ........... | empty memory | ........... |
++-------------+-------------+-------------+-------------+--------------+-------------+
+
+after write:
+
+block 0                       head                                     tail
++-------------+-------------+-------------+-------------+-------------+--------------+
+| main buffer | [M] entry 0 | [U] entry 1 | ........... | [U] entry I | empty memory |
++-------------+-------------+-------------+-------------+-------------+--------------+
+
+[M]         : marked entry
+[U]         : unmarked entry
+........... : repeat last block (entry or empty memory)
+N           : maximum number of entries the buffer can hold, N > 0
+I           : number of entries in the buffer, where 0 <= I <= N
+```
+
+<a id="clean-up"></a>
+### Clean Up
+
+```text
+before clean up:
+
+block 0                       head                                   tail
++-------------+-------------+-------------+-------------+-------------+
+| main buffer | [M] entry 0 | [U] entry 1 | ........... | [U] entry N |
++-------------+-------------+-------------+-------------+-------------+
+
+block 1
++-------------+--------------------------------------------------------+
+| scnd buffer | empty memory ......................................... |
++-------------+--------------------------------------------------------+
+
+block 2
++-------------+--------------------------------------------------------+
+| scnd buffer | empty memory ......................................... |
++-------------+--------------------------------------------------------+
+
+after clean up:
+
+block 0
++-------------+--------------------------------------------------------+
+| scnd buffer | empty memory ......................................... |
++-------------+--------------------------------------------------------+
+
+block 1         head                                      tail
++-------------+-------------+-------------+-------------+--------------+
+| main buffer | [U] entry 1 | ........... | [U] entry K | empty memory |
++-------------+-------------+-------------+-------------+--------------+
+
+block 2
++-------------+--------------------------------------------------------+
+| scnd buffer | empty memory ......................................... |
++-------------+--------------------------------------------------------+
+
+[M]         : marked entry
+[U]         : unmarked entry
+........... : repeat last block (entry or empty memory)
+N           : maximum number of entries the buffer can hold, N > 0
+J           : number of marked entries in the buffer, 0<= J <= N
+K           : number of unmarked entries in the buffer, after clean up K = N - J
+```
+
+Clean up process is how Fluffer frees space in the main buffer. Clean up is triggered when no space is left in the main buffer after an entry written. And it's the main reason the secondary buffer is required.
+Fluffer cleans up the main buffer in the following steps:
  - Erase secondary buffer.
+ - Copy all unmarked entries from main buffer into secondary buffer, starting from the first entry.
+ - Set secondary buffer as main buffer and main buffer as secondary buffer.
 
- - Copy all unmarked entries from main buffer into 
-   secondary buffer, starting from the first entry.
-   
- - Set secondary buffer as main buffer and
- main buffer as secondary buffer.
+<a id="migration"></a>
+### Migration
 
-#### Migrating
+```text
+before clean up:
 
-Migration occurs when attempting to write to a full buffer,
-and there were no space left in the buffer after clean up.
+block 0         head                                                 tail
++-------------+-------------+-------------+-------------+-------------+
+| main buffer | [U] entry 0 | [U] entry 1 | ........... | [U] entry N |
++-------------+-------------+-------------+-------------+-------------+
 
-FLuffer moves entries from the main buffer to the secondary
-buffer, except for the first entry. The new entry replaces 
-the it. Then swaps the main buffer and the secondary buffers,
-same as clean up.
+block 1
++-------------+--------------------------------------------------------+
+| scnd buffer | empty memory ......................................... |
++-------------+--------------------------------------------------------+
 
-FLuffer migrates the main buffer in the following steps:
+block 2
++-------------+--------------------------------------------------------+
+| scnd buffer | empty memory ......................................... |
++-------------+--------------------------------------------------------+
 
+after clean up:
+
+block 0
++-------------+--------------------------------------------------------+
+| scnd buffer | empty memory ......................................... |
++-------------+--------------------------------------------------------+
+
+block 1         head                                      tail
++-------------+-------------+-------------+-------------+--------------+
+| main buffer | [U] entry 1 | ........... | [U] entry P | empty entry  |
++-------------+-------------+-------------+-------------+--------------+
+
+block 2
++-------------+--------------------------------------------------------+
+| scnd buffer | empty memory ......................................... |
++-------------+--------------------------------------------------------+
+
+[M]         : marked entry
+[U]         : unmarked entry
+........... : repeat last block (entry or empty memory)
+N           : maximum number of entries the buffer can hold, N > 0
+P           : Number of entries after migration, P = N - 1
+```
+
+Migration occurs when attempting to write to a full buffer, and all entries in the main buffer are unmarked. As a result, after clean up process there will be no empty space in the new main buffer to add new entries. To solve this, Fluffer moves entries from the main buffer to the secondary buffer, except for the first entry. Then swaps the main buffer and the secondary buffers, same as clean up.
+
+Fluffer migrates the main buffer in the following steps:
  - Erase secondary buffer.
+ - Copy all unmarked entries from the main buffer into the secondary buffer, starting from the 2nd entry.
+ - Set secondary buffer as main buffer and main buffer as secondary buffer.
 
- - Copy all unmarked entries from the main buffer into
-   the secondary buffer, starting from the 2nd entry.
+Clean up and migration are very similar, and follow the exact same steps, except for copying entries from the main buffer into the secondary buffer. Migration can be considered as a special clean up process.
 
- - Set secondary buffer as main buffer and 
-   main buffer as secondary buffer.
-   
- - Write the new entry to main buffer at position 0.
+<a id="specs"></a>
+## Specs
 
-Clean up and migration are very similar, and follow the
-exact same steps, except for copying entries from the 
-main buffer into the secondary buffer.
+<a id="configuring-fluffer"></a>
+### Configuring Fluffer
 
-One last thing to talk about, is FLuffer cleanse.
+Fluffer is designed to have multiple instances on the same device. it's the users responsibility to make sure that those areas are not overlapped. 
+A Fluffer instance requires the following:
+1. `N`: number of blocks to allocate for Fluffer (must be > 1)
+2. `M`: number of pages per block (must be > 0)
+3. start page, page index at which fluffer blocks will be allocated. For example, if page index = 12, M=1, N=2, then fluffer will allocate pages 12 and 13 for as 2 separate blocks for main buffer and secondary buffer.
+4. page size: a macro that defines page size in bytes
+5. memory read handle: function used by fluffer instances to read bytes from the memory
+6. memory write handle: function used by fluffer instances to write to memory
+7. memory page erase handle: function used by fluffer instances to erase a page in memory
+8. element size: number of bytes for each fluffer entry (buffer element)
 
+<a id="calculating-required-memory"></a>
+### Calculating Required Memory
 
-#### Cleansing
+Fluffer uses `N` blocks of memory, each block is `M` pages. Total memory used by a fluffer instance is `N * M * page_size` bytes, with a minimum of `(2 * page_size)` bytes (N=2 and M=1).
 
-Cleansing occurs when FLuffer memory is corrupted. That is when
-there are 2 main buffer areas. It's an attempted recovery
-process.
-The buffer is corrupted when 2 areas have the main buffer 
-brand. That occurs if the clean up process was interrupted
-by a reset.
-Under normal conditions, main buffer contains data and
-secondary buffer is erased.
-To restore FLuffer, the contents of the 2 areas are checked for
-data. The area that contains more unchecked entries, will be 
-the main buffer, the other area will be the 
-secondary buffer.
+<a id="wear-leveling"></a>
+### Wear Leveling
 
+Fluffer distributes erase cycles between the main and secondary blocks. So, If there are `N` blocks, and each block has `K` erase cycles, each block 
 
-### Public Types
+<a id="public-types"></a>
+## Public Types
 
-##### Fluffer_Entry_t
+<a id="fluffer_config_t"></a>
+### Fluffer_Config_t
 
+```C
+typedef struct fluffer_config_t {
+    uint16_t page_size;         /**<  memory page size  */
+    uint8_t  word_size;         /**<  memory word size (byte aligned = 1, half word aligned = 2, word aligned = 4)  */
+    uint8_t  start_page;        /**<  allocated memory starting page index  */
+    uint8_t  pages_pre_block;   /**<  allocated pages per block  */
+    uint8_t  blocks;            /**<  total number of block for fluffer instance */
+    uint8_t  element_size;      /**<  fluffer element size (bytes)  */
+}Fluffer_Config_t;
 ```
-+---------------------------------------+
-| typedef struct __Fluffer_entry_t {    |
-|     uint8_t data[Fluffer_ENTRY_SIZE]; |
-|     uint16_t id;                      |
-| } Fluffer_Entry_t;                    |
-+---------------------------------------+
-```
+<a name="element-size"></a>
 
-  FLuffer entry object, members:
-  - data: contains the entry data, used to read the entry. 
-  - id: entry's id, used internally by FLuffer to distinguish
-  entries from each other.
+Fluffer instance configurations, describes how the fluffer instance's memory is organized and allocated.
+- **page_size**: Memory page size (bytes)
+- **word_size**:  Minimum number of bytes that can be written to flash memory (byte = 1, half word = 2, word = 4, double word = 8)
+- **start_page**: Index of page at which fluffer instance memory will be allocated 
+- **pages_pre_block**: Number of pages allocated for each fluffer block (must be > 0)
+- **blocks**: Number of blocks allocated for fluffer instance ( must be > 1)
+- **element_size**: Number of bytes that the fluffer element will occupy (bytes)
 
 
-##### Fluffer_Reader_t
+<a id="fluffer_context_t"></a>
+### Fluffer_Context_t
 
-```
-+--------------------------------------+  
-| typedef struct {                     |
-|     uint32_t read_offset;            |
-|   }Fluffer_Reader_t;                 |
-+--------------------------------------+
-```
-
-  FLuffer reader object, members:
-  - read_offset: address in the main buffer to start reading 
-  from, used internally by FLuffer logic.
-
-
-##### Fluffer_Error_t
-```
-+--------------------------------------+  
-| typedef enum {                       |
-|     Fluffer_ERROR_NONE,              |
-|     Fluffer_ERROR_NULLPTR,           |
-|     Fluffer_ERROR_NOT_FOUND,         |
-|     Fluffer_ERROR_EMPTY,             |
-|     Fluffer_ERROR_FULL,              |
-|     Fluffer_READ_CPLT,               |
-| } Fluffer_Error_t;                   |
-+--------------------------------------+
+```C
+typedef struct fluffer_context_t {
+    uint16_t head;          /**<  head index  */
+    uint16_t tail;          /**<  tail index  */
+    uint16_t size;          /**<  fluffer size, maximum number of entries that can written to fluffer  */
+    uint8_t  main_buffer;   /**<  main buffer block index  */
+}Fluffer_Context_t;
 ```
 
-  FLuffer error codes, returned by public APIs to indicate either 
-  success or error. Errors meaning:
+Fluffer context structure, holds information about current main buffer state variables.
+- **head**: main buffer's head index
+- **tail**: main buffer's tail index 
+- **size**: main buffer size (maximum number of entries that the buffer can hold)
+- **main_buffer**: index of main buffer block
 
-  - **Fluffer_ERROR_NONE**: no errors occurred, it was a success
-  - **Fluffer_ERROR_NULLPTR**: a null pointer was passed as a argument
-  - **Fluffer_ERROR_NOT_FOUND**: entry is not found
-  - **Fluffer_ERROR_EMPTY**: can't read, buffer is empty
-  - **Fluffer_ERROR_FULL**: buffer became full after last write
-  - **Fluffer_READ_CPLT**: read all entries from buffer
+<a id="fluffer_handle_error_t"></a>
+### Fluffer_Handle_Error_t
 
-
-### Public APIs
-
-##### void Fluffer_vidInitialize(Fluffer_Handles_t * psHandles)
-
-  Initializes FLuffer state, and handles used to read/write
-  from/to memory
-  
-   - check both areas for main buffer brand. if no areas
-     found, prepares the memory for 1st time use.
-  
-   - check that both area0 and area1 are not of the same type
-     (one is main buffer, the other is secondary). If both are
-     the same, start buffer cleanse.
-  
-   - If area0 is main buffer, set FLuffer's buffer address 
-     offset to area0's address, else set it to area1's address
-  
-   - Set internal reader to main buffer at 1st unmarked entry
-  
-   - Set internal writer to main buffer at 1st free location
-
-
-##### Fluffer_Error_t Fluffer_enInitReader(Fluffer_Reader_t * psReader)
-
-  Initializes an instance of FLuffer reader
-  
-   - Set reader object's `read_offset` to FLuffer's internal 
-     reader `read_offset`
-
-
-##### Fluffer_Error_t Fluffer_enReadNext(Fluffer_Reader_t * psReader, Fluffer_Entry_t * psEntry)
-
-  Reads next entry
-  
-   - Set entry's id
-  
-   - Read from reader's read_offset `FLUFFER_ENTRY_SIZE` bytes
-     into entry's data buffer
-  
-   - increment reader's `read_offset`
-
-
-##### Fluffer_Error_t Fluffer_enMarkEntry(Fluffer_Entry_t * psEntry)
-
-  Marks an entry
-  
-   - Get entry's address from entry's id
-  
-   - if entry's address is not valid, 
-     return FLUFFER_ERROR_NOT_FOUND
-  
-   - if entry is not found in buffer, 
-     return FLUFFER_ERROR_NOT_FOUND
-  
-   - Otherwise, Write entry's mark flags
-
-
-##### Fluffer_Error_t Fluffer_enWriteEntry(Fluffer_Entry_t * psEntry)
-
-  Writes an entry to main buffer
-  
-   - Get entry address from internal FLuffer writer
-  
-   - write entry data to buffer
-  
-   - increment FLuffer writer offset
-  
-   - if there is no more space left main buffer to hold 
-     a new entry, start clean up
-
-
-### Private Types
-
-##### Fluffer_t
-
-```
-+----------------------------------------------------+
-| typedef struct __Fluffer_t {                       |
-|     uint8_t memory_area[Fluffer_ALLOCATED_AREAS];  |
-|     uint8_t main_buffer;                           |
-|     uint32_t head;                       |
-|     uint32_t tail;                       |
-| } Fluffer_t;                                       |
-+----------------------------------------------------+
+```C
+typedef enum fluffer_handle_error_t {
+    FH_ERR_NONE,                /**<  No error occurred  */
+    FH_ERR_NULLPTR,             /**<  an unexpected null pointer  */
+    FH_ERR_INVALID_ADDRESS,     /**<  invalid address for read, write  */
+    FH_ERR_INVALID_PAGE,        /**<  invalid page index  */
+    FH_ERR_CORRUPTED_BLOCK,     /**<  corrupted page (byte read after a write operation were not the same as the bytes written)  */
+}Fluffer_Handle_Error_t;
 ```
 
-  FLuffer object, keeps track of states of each area 
-  (main buffer, secondary buffer), current main buffer area,
-  and has an internal reader and writer objects that hold the 
-  current read/write offsets
-  
-  - **memory_area**: contains the flags for each area 
-    (which area) is the main buffer, and which is a
-    secondary buffer.
-  - **main_buffer**: main buffer area
-  - **head**: buffer's head, start reading from here
-  - **tail**: buffer's tail, start writing from here
-  
+Error codes returned by flash memory IO handles to indicate success or failure of the operation.
+Enumerations:
+- **FH_ERR_NONE**: No error occurred
+- **FH_ERR_NULLPTR**: an unexpected null pointer
+- **FH_ERR_INVALID_ADDRESS**: invalid address for read, write
+- **FH_ERR_INVALID_BLOCK**: invalid page index
+- **FH_ERR_CORRUPTED_BLOCK**: corrupted page (byte read after a write operation were not the same as the bytes written)
 
-### Private APIs
+<a id="fluffer_handles_t"></a>
+### Fluffer_Handles_t
 
-##### void Fluffer_vidPrepareFluffer(void)
+```C
+typedef Fluffer_Handle_Error_t (*Fluffer_Read_Handle_t)(uint32_t, uint8_t *, uint16_t);
+typedef Fluffer_Handle_Error_t (*Fluffer_Write_Handle_t)(uint32_t, uint8_t *, uint16_t);
+typedef Fluffer_Handle_Error_t (*Fluffer_Erase_Handle_t)(uint8_t);
 
-  Prepares allocated FLuffer memory. Called only on 1st time 
-  FLuffer is used. Initially, allocated memory could be erased.
-  But there is a possibility it's not. So, the allocated memory
-  will be erased
+typedef struct fluffer_handles_t {
+    Fluffer_Read_Handle_t  read_handle;     /**<  read handle  */
+    Fluffer_Write_Handle_t write_handle;    /**<  write handle  */
+    Fluffer_Erase_Handle_t erase_handle;    /**<  erase handle  */
+}Fluffer_Handles_t;
+```
 
-   - Erase both areas.
+Fluffer handles, define memory IO handles used by a fluffer instance to read, write to memory and erase memory page.
+Members:
+- **read_handle**: read a given number of bytes from memory into a given buffer
+- **write_handle**: write a given number of bytes from a buffer into memory, fluffer will erase memory before writing to it
+- **erase_handle**: erase a page with the given index (0 indexed)
 
-   - set area0 as main buffer.
+<a id="fluffer_t"></a>
+### Fluffer_t 
 
-   - set area1 as secondary buffer.
+```C
+typedef struct fluffer_t {
+    Fluffer_Handles_t handles;  /**<  fluffer instance handles  */
+    Fluffer_Context_t context;  /**<  fluffer instance context  */
+    Fluffer_Config_t cfg;       /**<  fluffer instance memory configurations  */
+}Fluffer_t;
+```
 
-   - set main_buffer member of internal FLuffer object
+Fluffer structure, defines a fluffer instance, its configurations, context, and FLASH memory IO handles.
 
+<a id="fluffer_reader_t"></a>
+### Fluffer_Reader_t
 
-##### Fluffer_Error_t Fluffer_enBrandArea(uint8_t u8Area)
+```C
+typedef struct {
+    uint16_t id;    /**<    index of entry to be read   */
+}Fluffer_Reader_t;
+```
 
-  Sets area as a main buffer
- 
-   - check if area is available
-  
-   - set area as main buffer
+Fluffer reader structure:
+- **id**: index of the first unmarked entry in the main buffer (main buffer's head)
 
+<a id="fluffer_error_t"></a>
+### Fluffer_Error_t
 
-##### Fluffer_Error_t Fluffer_enFindUnMarked(uint32_t * pu32Offset)
+```C
+typedef enum {
+    FLUFFER_ERROR_NONE,         /**<  no errors  */
+    FLUFFER_ERROR_NULLPTR,      /**<  unexpected null pointer  */
+    FLUFFER_ERROR_PARAM,        /**<  unexpected parameter value  */
+    FLUFFER_ERROR_EMPTY,        /**<  fluffer instance is empty  */
+    FLUFFER_ERROR_FULL,         /**<  fluffer instance is full  */
+    FLUFFER_ERROR_MEMORY,       /**<  memory access error (read, write, erase)  */
+} Fluffer_Error_t;
+```
 
-  Finds first unmarked entry's offset to read
-  
-   - Start from main buffer area.
-  
-   - read entry mark
-  
-   - if not marked, return the current offset
-  
-   - if marked, increment read_offset, go to step 2
-  
-   - if the main buffer has no unmarked entries, 
-     return Fluffer_ERROR_NOT_FOUND
+Fluffer error codes, returned by public APIs to indicate either 
+success or error. Errors meaning:
+- **FLUFFER_ERROR_NONE**: no errors occurred, it was a success
+- **FLUFFER_ERROR_NULLPTR**: a null pointer was passed as a argument
+- **FLUFFER_ERROR_PARAM**: an unexpected parameter value
+- **FLUFFER_ERROR_EMPTY**: can't read, buffer is empty
+- **FLUFFER_ERROR_FULL**: buffer became full after last write
+- **FLUFFER_ERROR_MEMORY**: memory access error (read, write, erase)
 
+<a id="public-apis"></a>
+## Public APIs
 
-##### Fluffer_Error_t Fluffer_enFindEmpty(uint32_t * psOffset)
+<a id="fluffer_eninitialize"></a>
+### Fluffer_enInitialize
 
-  Finds first empty location's offset to write to
+```C
+Fluffer_Error_t Fluffer_enInitialize(Fluffer_t * psFluffer)
+```
 
-   - Start from main buffer area.
-  
-   - read entry start
-  
-   - if not marked, return the current offset
-  
-   - if marked, increment read_offset, go to step 2
-  
-   - if the main buffer has no more empty area, 
-     return Fluffer_ERROR_FULL
+Initialize fluffer instance state and prepare fluffer instance for usage, depending on values in fluffer instance configurations (cfg)
 
-##### Fluffer_Error_t Fluffer_enCleanUp(void)
+**param**
+- *psFluffer* : pointer to fluffer instance 
 
-  Cleans up main buffer.
-  
-   - Start from main buffer read_offset,
-  
-   - Read entry
-  
-   - write entry to secondary buffer
-  
-   - repeat from step 2
-  
-   - when all unmarked entries are moved to secondary buffer,
-     mark secondary buffer as main buffer
-  
-   - erase old main buffer
+**return**
+[*Fluffer_Error_t*](#fluffer_error_t)
+- *FLUFFER_ERROR_NONE* : if no errors occurred
+- *FLUFFER_ERROR_NULLPTR* : if psFluffer instance, or one (or more) its handles is null
+- *FLUFFER_ERROR_PARAM* : if fluffer instance configurations are invalid
 
+<a id="fluffer_eninitreader"></a>
+### Fluffer_enInitReader
 
-### Private Macros
+```C
+Fluffer_Error_t Fluffer_enInitReader(const Fluffer_t * const psFluffer, Fluffer_Reader_t * psReader)
+```
 
-##### FLUFFER_OFFSET_TO_ID(u32Offset)
+Initialize given reader instance
 
-Converts from offset to an ID
+**param**
+- *psFluffer* : pointer to fluffer instance 
+- *psReader* : pointer to reader instance
 
+**return** 
+[*Fluffer_Error_t*](#fluffer_error_t)
+- *FLUFFER_ERROR_NONE* : if no errors occurred
+- *FLUFFER_ERROR_NULLPTR* : if psFluffer instance, or the reader instance is null
 
-##### FLUFFER_ID_TO_OFFSET(u32Id)
+<a id="fluffer_enisempty"></a>
+### Fluffer_enIsEmpty
+```C
+Fluffer_Error_t Fluffer_enIsEmpty(const Fluffer_t * const psFluffer, uint8_t * pu8Result)
+```
 
-Converts from ID to offset
+Check if fluffer instance is empty (no unmarked entries in the main buffer)
 
+**param**
+- *psFluffer* : pointer to fluffer instance 
+- *pu8Result*: pointer to a unit8_t variable, to store result in it. 1 if empty, otherwise 0
+
+**return** 
+[*Fluffer_Error_t*](#fluffer_error_t)
+- *FLUFFER_ERROR_NONE* : if no errors occurred
+- *FLUFFER_ERROR_NULLPTR* : if psFluffer instance or result pointer is null
+
+<a id="fluffer_enisfull"></a>
+### Fluffer_enIsFull
+```C
+Fluffer_Error_t Fluffer_enIsFull(const Fluffer_t * const psFluffer, uint8_t * pu8Result)
+```
+
+Check is fluffer instance has sufficient memory to write a new entry
+
+**param**
+- *psFluffer* : pointer to fluffer instance 
+- *pu8Result*: pointer to a unit8_t variable, to store result in it. 1 if empty, otherwise 0
+
+**return** 
+[*Fluffer_Error_t*](#fluffer_error_t)
+- *FLUFFER_ERROR_NONE* : if no errors occurred
+- *FLUFFER_ERROR_NULLPTR* : if psFluffer instance or result pointer is null
+
+<a id="fluffer_enreadentry"></a>
+### Fluffer_enReadEntry
+```C
+Fluffer_Error_t Fluffer_enReadEntry(const Fluffer_t * const psFluffer, Fluffer_Reader_t * const psReader, uint8_t * const pu8Buffer)
+```
+
+Read entry from main buffer, pointed to by the reader instance, and copy it into given buffer
+
+**param**
+- *psFluffer*: pointer to fluffer instance
+- *psReader*: pointer to reader instance
+- *pu8Buffer*: pointer to buffer to copy entry into, must be at least [element_size](#element-size) bytes
+
+**return**
+[*Fluffer_Error_t*](#fluffer_error_t)
+- *FLUFFER_ERROR_NONE* : if no errors occurred
+- *FLUFFER_ERROR_NULLPTR* : if psFluffer instance, the reader instance, or buffer pointer is null
+
+<a id="fluffer_enmarkentry"></a>
+### Fluffer_enMarkEntry
+```C
+Fluffer_Error_t Fluffer_enMarkEntry(Fluffer_t * const psFluffer)
+```
+
+Mark main buffer's head entry as pending for removal
+
+**param**
+- *psFluffer*: pointer to fluffer instance
+
+**return**
+[*Fluffer_Error_t*](#fluffer_error_t)
+- *FLUFFER_ERROR_NONE* : if no errors occurred
+- *FLUFFER_ERROR_NULLPTR* : if psFluffer instance, the reader instance, or buffer pointer is null
+
+<a id="fluffer_enwriteentry"></a>
+### Fluffer_enWriteEntry
+```C
+Fluffer_Error_t Fluffer_enWriteEntry(Fluffer_t * const psFluffer, uint8_t * const pu8Data)
+```
+
+Write given data buffer as an entry into given fluffer instance's main buffer
+
+**param**
+- *psFluffer*: pointer to fluffer instance
+ *pu8Data*: pointer to data to be written as an entry, its size must be [element_size](#element-size) bytes
+
+**return**
+[*Fluffer_Error_t*](#fluffer_error_t)
+- *FLUFFER_ERROR_NONE* : if no errors occurred
+- *FLUFFER_ERROR_NULLPTR* : if psFluffer instance, the reader instance, or data pointer is null
+
+<a id="usage"></a>
+## Usage
+
+<a id="example-1"></a>
+### Example 1
+
+```C
+
+```
+
+<a id="example-2"></a>
+### Example 2
+
+```C
+```
+
+<a id="example-3"></a>
+### Example 3
+
+```C
+```
+
+<a id="notes"></a>
+## Notes
+
+[^1]: ST application note on [EEPROM emulation](https://www.st.com/resource/en/application_note/cd00165693-eeprom-emulation-in-stm32f10x-microcontrollers-stmicroelectronics.pdf)
