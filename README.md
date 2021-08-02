@@ -37,9 +37,8 @@ Fluffer, is a persistent FIFO buffer (FIFO queue data structure) that it is stor
     - [Fluffer_enMarkEntry](#fluffer_enmarkentry)
     - [Fluffer_enWriteEntry](#fluffer_enwriteentry)
 - [Usage](#usage)
+    - [Configuration](#configuration)
     - [Example 1](#example-1)
-    - [Example 2](#example-2)
-    - [Example 3](#example-3)
 - [Notes](#notes)
 
 <!-- /MarkdownTOC -->
@@ -583,23 +582,112 @@ Write given data buffer as an entry into given fluffer instance's main buffer
 <a id="usage"></a>
 ## Usage
 
+<a id="configuration"></a>
+### Configuration
+1. in the file `fluffer_config.h`, configure the following `#define`s:
+```C
+/**
+ * @brief Maximum number of bytes for memory word size for all fluffer
+ * instances
+ * */
+#define FLUFFER_MAX_MEMORY_WORD_SIZE    2
+
+/**
+ * @brief Maximum number of bytes for all fluffer instances elements
+ * (maximum element size for all fluffer instances)
+ * */
+#define FLUFFER_MAX_ELEMENT_SIZE        100
+
+/**
+ * @brief Clean byte content, shared between all fluffer instances
+ * */
+#define FLUFFER_CLEAN_BYTE_CONTENT      0xFF
+```
+  1. *FLUFFER_MAX_MEMORY_WORD_SIZE*: maximum memory word size (in bytes) for all fluffer instances. for example, if there are 3 fluffer instances, each for a different independent memory with 1, 2, 4 bytes memory words. Then this switch must be set to 4.
+
+  2. *FLUFFER_MAX_ELEMENT_SIZE*: maximum element size (in bytes) for all fluffer instances. For example, if there are 3 fluffer instances each with element sizes 10, 20, 40. Then this switch must be set to 40.
+
+  3. *FLUFFER_CLEAN_BYTE_CONTENT*: Content of bytes after erase, this is kinda redundant as fluffer is made specifically for flash memory. And byte contnt of flash memory after successful erase is always `0xFF`. However, make sure this is set to `0xFF`.
+
 <a id="example-1"></a>
 ### Example 1
 
 ```C
+#include <stdint.h>
+#include <fluffer.h>
 
-```
+Fluffer_Handle_Error_t FlfrReadHandle(uint32_t u32Offset, uint8_t * pu8Buffer, uint16_t u16Len)
+{
+    // read from memory starting from address = u32Offset
+    // into buffer: pu8Buffer
+    // read number of bytes = u16Len
+}
 
-<a id="example-2"></a>
-### Example 2
+Fluffer_Handle_Error_t FlfrWriteHandle(uint32_t u32Offset, uint8_t * pu8Data, uint16_t u16Len)
+{
+    // write bytes into memory starting from address = u32Offset
+    // from buffer: pu8Data
+    // write number of bytes = u16Len
+}
 
-```C
-```
+Fluffer_Handle_Error_t FlfrEraseHandle(uint8_t u8PageIndex)
+{
+    // erase memory page: u8pageIndex
+}
 
-<a id="example-3"></a>
-### Example 3
+int main(void)
+{
 
-```C
+    // init 
+    //  .
+    //  .
+    //  .
+
+    Fluffer_t Local_sFluffer;
+    Fluffer_Reader_t Local_sReader;
+    uint8_t Local_au8TempBuffer[100];
+
+    //  initialize fluffer memory config
+    Local_sFluffer.cfg.page_size = MEMORY_PAGE_SIZE;
+    Local_sFluffer.cfg.blocks = 2;
+    Local_sFluffer.cfg.pages_pre_block = 1;
+    Local_sFluffer.cfg.start_page = 0;
+    Local_sFluffer.cfg.word_size = 1;
+    Local_sFluffer.cfg.element_size = 20;
+
+    // set handles
+    Local_sFluffer.handles.read_handle = FlfrReadHandle;
+    Local_sFluffer.handles.write_handle = FlfrWriteHandle;
+    Local_sFluffer.handles.erase_handle = FlfrEraseHandle;
+
+    // initialize fluffer instance
+    Fluffer_enInitialize(&Local_sFluffer);
+
+    // initialize reader instance
+    Fluffer_enInitReader(&Local_sFluffer, &Local_sReader);
+
+    // read entry
+    if(Fluffer_enReadEntry(&Local_sFluffer, &Local_sReader, Local_au8TempBuffer) == FLUFFER_ERROR_EMPTY)
+    {
+        // do some stuff with entry
+    }
+    else
+    {
+        // mark entry
+        Fluffer_enMarkEntry(&Local_sFluffer);
+    }
+
+    // write new entry
+    Fluffer_enWriteEntry(&Local_sFluffer, Local_au8TempBuffer);
+
+    while(1)
+    {
+
+    }
+
+    return 0;
+}
+
 ```
 
 <a id="notes"></a>

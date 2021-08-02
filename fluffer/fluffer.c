@@ -22,7 +22,6 @@
 /* ------------------------------------------------------------------------------------ */
 
 // NOTE
-// NOTE tail after clean up & mi
 
 /* ------------------------------------------------------------------------------------ */
 
@@ -442,7 +441,7 @@ static void Fluffer_vidBrandBlock(const Fluffer_t * const psFluffer, uint8_t u8B
  * */
 static uint8_t Fluffer_u8EntryIsMarked(const Fluffer_t * const psFluffer, uint16_t u16EntryId)
 {
-    uint32_t Local_u32EntryAddress = FLUFFER_ENTRY_ADDRESS_BY_ID(psFluffer, u16EntryId);	/*	entry address	*/
+    uint32_t Local_u32EntryAddress = FLUFFER_ENTRY_MARK_ADDRESS_BY_ID(psFluffer, u16EntryId);	/*	entry address	*/
 
     /*	read entry mark	into temp buffer	*/
     psFluffer->handles.read_handle(Local_u32EntryAddress, Fluffer_au8EntryBuffer, psFluffer->cfg.word_size);
@@ -461,22 +460,12 @@ static uint8_t Fluffer_u8EntryIsMarked(const Fluffer_t * const psFluffer, uint16
  * */
 static uint8_t Fluffer_u8EntryIsEmpty(const Fluffer_t * const psFluffer, uint16_t u16EntryId)
 {
-    uint32_t Local_u32ReadAddress = FLUFFER_ENTRY_ADDRESS_BY_ID(psFluffer, u16EntryId);		/*	entry's starting memory address	*/
+    uint32_t Local_u32ReadAddress = FLUFFER_ENTRY_MARK_ADDRESS_BY_ID(psFluffer, u16EntryId);		/*	entry's starting memory address	*/
 
-    /*	check if entry is marked	*/
-    if(Fluffer_u8EntryIsMarked(psFluffer, u16EntryId) == 1)
-    {
-        return 0;
-    }
-    else
-    {
-        /*	continue	*/
-    }
-
-    psFluffer->handles.read_handle(Local_u32ReadAddress, Fluffer_au8EntryBuffer, psFluffer->cfg.word_size);
+    psFluffer->handles.read_handle(Local_u32ReadAddress, Fluffer_au8EntryBuffer, psFluffer->cfg.element_size + 1);
 
     /*	check if read bytes == erased bytes	*/
-    return Fluffer_u8IsFilled(Fluffer_au8EntryBuffer, psFluffer->cfg.element_size, FLUFFER_CLEAN_BYTE_CONTENT);
+    return Fluffer_u8IsFilled(Fluffer_au8EntryBuffer, psFluffer->cfg.element_size + 1, FLUFFER_CLEAN_BYTE_CONTENT);
 }
 
 /* ------------------------------------------------------------------------------------ */
@@ -496,7 +485,7 @@ static uint16_t Fluffer_u16FindHead(const Fluffer_t * const psFluffer)
     while((Local_u16EntryIndex < psFluffer->context.size) && (Local_enHeadFound == RESET))
     {
         /*	check if entry is not marked	*/
-        if(Fluffer_u8EntryIsMarked(psFluffer, Local_u16EntryIndex) == 0)
+        if(Fluffer_u8EntryIsMarked(psFluffer, Local_u16EntryIndex) == FALSE)
         {
             Local_enHeadFound = SET;
         }
@@ -527,7 +516,7 @@ static uint16_t Fluffer_u16FindTail(const Fluffer_t * const psFluffer)
     while((Local_u16EntryIndex < psFluffer->context.size) && (Local_enTailFound == RESET))
     {
         /*	check if entry is empty	*/
-        if(Fluffer_u8EntryIsEmpty(psFluffer, Local_u16EntryIndex))
+        if(Fluffer_u8EntryIsEmpty(psFluffer, Local_u16EntryIndex) == TRUE)
         {
             Local_enTailFound = SET;
         }
@@ -559,7 +548,7 @@ static void Fluffer_vidCopyEntries(const Fluffer_t * const psFluffer, const Fluf
     uint16_t Local_u16WriteIndex = psTransfer->dst_id;	    /*	write index in destination block	*/
 
     /*	loop over entries in the source block	*/
-    for(;Local_u16ReadIndex < psTransfer->size; Local_u16ReadIndex++)
+    while(Local_u16ReadIndex < psTransfer->size)
     {
         /*	get source block entry's address	*/
         Local_u32ReadAddress = FLUFFER_BLOCK_ENTRY_ADDRESS_BY_ID(psFluffer, psTransfer->src_block, Local_u16ReadIndex);
@@ -600,11 +589,11 @@ static void Fluffer_vidCleanUp(Fluffer_t * const psFluffer)
         .src_id = psFluffer->context.head,
         .dst_block = Local_u8NextBlock,
         .dst_id = 0,
-        .size = FLUFFER_CURRENT_ENTRIES(psFluffer)
+        .size = psFluffer->context.tail
     };
 
     /*	check if current entries == buffer size	*/
-    if(Local_sTransfer.size == psFluffer->context.size)
+    if(FLUFFER_CURRENT_ENTRIES(psFluffer) == psFluffer->context.size)
     {
         Local_sTransfer.src_id++;
     }
@@ -627,6 +616,10 @@ static void Fluffer_vidCleanUp(Fluffer_t * const psFluffer)
 
     /*	set main buffer	*/
     psFluffer->context.main_buffer = Local_u8NextBlock;
+
+    /*	set new head & tail	*/
+    psFluffer->context.tail = psFluffer->context.tail - Local_sTransfer.src_id;
+    psFluffer->context.head = 0;
 }
 
 /* ------------------------------------------------------------------------------------ */
@@ -635,6 +628,8 @@ static void Fluffer_vidCleanUp(Fluffer_t * const psFluffer)
 
 Fluffer_Error_t Fluffer_enInitialize(Fluffer_t * psFluffer)
 {
+    //uint8_t Local_u8MainBuffer;
+
     /*	check for null pointers	*/
     if(IS_NULLPTR(psFluffer) || !FLUFFER_VALIDATE_HANDLES(psFluffer))
     {
@@ -648,6 +643,7 @@ Fluffer_Error_t Fluffer_enInitialize(Fluffer_t * psFluffer)
     }
 
     /*	check blocks for main buffer	*/
+    //if(Fluffer_u8GetMainBufferBlocks(psFluffer, &Local_u8MainBuffer) != 1)
     if(Fluffer_u8GetMainBufferBlocks(psFluffer, &psFluffer->context.main_buffer) != 1)
     {
         /* if main blocks == 0: format for 1st time use
@@ -659,7 +655,7 @@ Fluffer_Error_t Fluffer_enInitialize(Fluffer_t * psFluffer)
     }
     else
     {
-        /*	do nothing	*/
+        //psFluffer->context.main_buffer = Local_u8MainBuffer;
     }
 
     /*	set fluffer size (number of entries)	*/
@@ -732,8 +728,8 @@ Fluffer_Error_t Fluffer_enReadEntry(const Fluffer_t * const psFluffer, Fluffer_R
         return FLUFFER_ERROR_NULLPTR;
     }
 
-    /*	check if fluffer is empty	*/
-    if(FLUFFER_IS_EMPTY(psFluffer))
+    /*	check if fluffer is empty or reader head == tail	*/
+    if(FLUFFER_IS_EMPTY(psFluffer) || (psReader->id == psFluffer->context.tail))
     {
         return FLUFFER_ERROR_EMPTY;
     }

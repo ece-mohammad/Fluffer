@@ -12,9 +12,19 @@
 #define GET_VERSION(major, minor)		__GET_VERSION(major, minor)
 #define __GET_VERSION(major, minor)		#major "." #minor
 
-
+/*	stringfy	*/
 #define __TO_STR(x)						#x
 #define TO_STR(x)						__TO_STR(x)
+
+/*	true */
+#ifndef TRUE
+#define TRUE	(1 == 1)
+#endif	/*	TRUE	*/
+
+/*	false	*/
+#ifndef FALSE
+#define FALSE	(1 == 0)
+#endif	/*	FALSE	*/
 
 /*	check range, inclusive (including start and end points)	*/
 #define IN_RANGE_IN(v, s, e)		(((s) <= (v)) && ((v) <= (e)))
