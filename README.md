@@ -25,6 +25,9 @@ Fluffer, is a persistent FIFO buffer (FIFO queue data structure) that it is stor
     - [Fluffer_Context_t](#fluffer_context_t)
     - [Fluffer_Handle_Error_t](#fluffer_handle_error_t)
     - [Fluffer_Handles_t](#fluffer_handles_t)
+    - [Fluffer_Read_Handle_t](#fluffer_read_handle_t)
+    - [Fluffer_Write_Handle_t](#fluffer_write_handle_t)
+    - [Fluffer_Erase_Handle_t](#fluffer_erase_handle_t)
     - [Fluffer_t](#fluffer_t)
     - [Fluffer_Reader_t](#fluffer_reader_t)
     - [Fluffer_Error_t](#fluffer_error_t)
@@ -390,10 +393,6 @@ Enumerations:
 ### Fluffer_Handles_t
 
 ```C
-typedef Fluffer_Handle_Error_t (*Fluffer_Read_Handle_t)(uint32_t, uint8_t *, uint16_t);
-typedef Fluffer_Handle_Error_t (*Fluffer_Write_Handle_t)(uint32_t, uint8_t *, uint16_t);
-typedef Fluffer_Handle_Error_t (*Fluffer_Erase_Handle_t)(uint8_t);
-
 typedef struct fluffer_handles_t {
     Fluffer_Read_Handle_t  read_handle;     /**<  read handle  */
     Fluffer_Write_Handle_t write_handle;    /**<  write handle  */
@@ -406,6 +405,51 @@ Members:
 - **read_handle**: read a given number of bytes from memory into a given buffer
 - **write_handle**: write a given number of bytes from a buffer into memory, fluffer will erase memory before writing to it
 - **erase_handle**: erase a page with the given index (0 indexed)
+
+<a id="fluffer_read_handle_t"></a>
+### Fluffer_Read_Handle_t
+
+```C
+typedef Fluffer_Handle_Error_t (*Fluffer_Read_Handle_t)(uint32_t, uint8_t *, uint16_t);
+```
+
+**param**
+- *uint32_t* : memory address offset to start reading from, the offset is relative to address `0x00000000`. For example, in `STM32F103`, flash memory address spaces starts from `0x0800000`, so the absolute address  = `0x0800000 + address offset` 
+- *uint8_t \** : pointer to uint8_t buffer, to write read bytes into
+- *uint16_t* : number of bytes to read
+
+**return**
+[Fluffer_Handle_Error_t](#fluffer_handle_error_t)
+
+<a id="fluffer_write_handle_t"></a>
+### Fluffer_Write_Handle_t
+
+```C
+typedef Fluffer_Handle_Error_t (*Fluffer_Write_Handle_t)(uint32_t, uint8_t *, uint16_t);
+```
+
+**param**
+- *uint32_t* : memory address offset to start writing to, the offset is relative to address `0x00000000`. For example, in `STM32F103`, flash memory address spaces starts from `0x0800000`, so the absolute address  = `0x0800000 + address offset` 
+- *uint8_t \** : pointer to uint8_t buffer to write bytes from into the memory
+- *uint16_t* : number of bytes to write
+
+**return**
+[Fluffer_Handle_Error_t](#fluffer_handle_error_t)
+
+**Note**: fluffer will always erase pages before writing to them. So, in the normal case, writing to memory will always be successful
+
+<a id="fluffer_erase_handle_t"></a>
+### Fluffer_Erase_Handle_t
+
+```C
+typedef Fluffer_Handle_Error_t (*Fluffer_Erase_Handle_t)(uint8_t);
+```
+
+**param**
+- *uint8_t*: Index of page to be erased (absolute index, starting from page index 0)
+
+**return**
+[Fluffer_Handle_Error_t](#fluffer_handle_error_t)
 
 <a id="fluffer_t"></a>
 ### Fluffer_t 

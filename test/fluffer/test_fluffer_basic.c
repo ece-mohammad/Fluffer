@@ -18,6 +18,8 @@
 
 #define MEMORY_PAGE_SIZE			64
 #define MEMORY_PAGES				4
+#define MEMORY_WORD_SIZE			1
+#define BASIC_TEST_ELEMENT_SIZE		20
 
 #define ENTRY_0						1
 #define ENTRY_1						2
@@ -29,7 +31,6 @@
 #define ENTRY_7						8
 #define ENTRY_8						9
 
-#define BASIC_TEST_ELEMENT_SIZE		20
 
 #define ENTRY_ID_TO_MARK_ADDRESS(fluffer, id)	((((fluffer).cfg.element_size + (fluffer).cfg.word_size) * (id)) + (fluffer).cfg.word_size)
 #define ENTRY_ID_TO_ADDRESS(fluffer, id)		(ENTRY_ID_TO_MARK_ADDRESS(fluffer, id) + (fluffer).cfg.word_size)
@@ -78,8 +79,8 @@ static void set_default_handles(Fluffer_t * psFluffer)
  * blocks = 2
  * pages per block = 1
  * start page = 0
- * word size = 1
- * element size = 20
+ * word size = memory word size
+ * element size = element size
  * */
 static void memcfg(Fluffer_t * psFluffer)
 {
@@ -88,8 +89,8 @@ static void memcfg(Fluffer_t * psFluffer)
     psFluffer->cfg.blocks = 2;
     psFluffer->cfg.pages_pre_block = 1;
     psFluffer->cfg.start_page = 0;
-    psFluffer->cfg.word_size = 1;
-    psFluffer->cfg.element_size = 20;
+    psFluffer->cfg.word_size = MEMORY_WORD_SIZE;
+    psFluffer->cfg.element_size = BASIC_TEST_ELEMENT_SIZE;
 }
 
 static void fill_buffer(uint8_t * pu8Buffer, uint16_t u16Len, uint8_t u8Fill)
@@ -195,7 +196,6 @@ static void test_fluffer_basic_functions(void)
     fill_buffer(Local_au8DataBuffer, sizeof(Local_au8DataBuffer), ENTRY_0);
     Local_enError = Fluffer_enWriteEntry(&Local_sFluffer, Local_au8DataBuffer);
     TEST_ASSERT_EQUAL_MESSAGE(Local_enError, FLUFFER_ERROR_NONE, "FlufferWrite error\n");
-    TEST_ASSERT_EQUAL_INT16_MESSAGE(2, Local_u16Address, "IdToAddress Failed\n");
     TEST_ASSERT_EACH_EQUAL_UINT8_MESSAGE(ENTRY_0, &MEMORY[0][Local_u16Address], sizeof(Local_au8DataBuffer), "FlufferWrite failed\n");
 
     /*	08. test isFull		*/
@@ -297,7 +297,6 @@ static void test_fluffer_basic_functions(void)
     Local_u16Address = ENTRY_ID_TO_ADDRESS(Local_sFluffer, 2);
     Local_enError = Fluffer_enWriteEntry(&Local_sFluffer, Local_au8DataBuffer);
     TEST_ASSERT_EQUAL_MESSAGE(Local_enError, FLUFFER_ERROR_NONE, "FlufferWrite error\n");
-    TEST_ASSERT_EQUAL_INT16_MESSAGE(44, Local_u16Address, "IdToAddress Failed\n");
     // clean up test
     Local_u16Address = ENTRY_ID_TO_ADDRESS(Local_sFluffer, 0);
     TEST_ASSERT_EACH_EQUAL_UINT8_MESSAGE(ENTRY_1, &MEMORY[1][Local_u16Address], sizeof(Local_au8DataBuffer), "CleanUp failed @entry 1\n");
@@ -326,7 +325,6 @@ static void test_fluffer_basic_functions(void)
     Local_u16Address = ENTRY_ID_TO_ADDRESS(Local_sFluffer, 2);
     Local_enError = Fluffer_enWriteEntry(&Local_sFluffer, Local_au8DataBuffer);
     TEST_ASSERT_EQUAL_MESSAGE(Local_enError, FLUFFER_ERROR_NONE, "FlufferWrite error\n");
-    TEST_ASSERT_EQUAL_INT16_MESSAGE(44, Local_u16Address, "IdToAddress Failed\n");
 
     /*	22. test migration	*/
     Debug("Test 21\n");
@@ -426,7 +424,7 @@ void tearDown(void)
 {
 }
 
-void test_fluffer_basic(void)
+void test_fluffer(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_fluffer_basic_functions);
